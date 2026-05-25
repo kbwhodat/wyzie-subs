@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://sub.wyzie.io/">
+  <a href="https://sub.wyzie.ru/">
     <img src="https://i.postimg.cc/L5ppKYC5/cclogo.png" height="120">
     <h1 align="center">Wyzie Subs</h1>
   </a>
@@ -7,16 +7,16 @@
 
 ## A simple easy to use Subtitle Scraper API
 
-> **This project is now closed source.** The source code is no longer publicly available.
-
 ### Features
 - **Simple**: Just send a request to the API with the TMDB or IMDB ID of the movie or TV show and get the subtitles for.
 - **Fast**: The API is hosted on a edge cloud provider with multiple proxies for spoofing requests (response time varies).
-- **Free**: The API is completely free to use.
-- **Hosted**: Available at [sub.wyzie.io](https://sub.wyzie.io).
-- **AI Translation**: Translate any subtitle into 80+ languages on demand, streamed cue by cue. Available on Pro keys. See [the docs](https://docs.wyzie.io/subs/usage/translate).
+- **Free**: The API is completely free to use and has no rate limits (don't abuse this please 🙏).
+- **Open-Source**: The API is open-source and you can host it yourself if you want to.
 
-[*Providers Status*](https://sub.wyzie.io/status)
+**Currently Supported Providers**  
+1. [OpenSubtitles](https://www.opensubtitles.org/)
+2. [SubDl](https://subdl.com/)
+3. [Subscene](https://subscene.com/) (Soon)
 
 ### Request Flow Chart
 ![request flow chart](.github/flowchart.png)
