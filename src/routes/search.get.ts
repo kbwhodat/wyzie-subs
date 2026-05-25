@@ -3,6 +3,7 @@
 import { createErrorResponse, convertTmdbToImdb } from "~/utils/utils";
 import type { RequestType, ResponseType } from "~/utils/types";
 import { search } from "~/utils/function";
+import { getDownloadHost, rewriteDownloadUrl } from "~/utils/download-url";
 
 export default defineEventHandler(async (event) => {
   const query = getQuery(event);
@@ -134,39 +135,9 @@ export default defineEventHandler(async (event) => {
       );
     }
 
+    const downloadHost = getDownloadHost(getRequestURL(event));
     const transformedData = data.map((item: ResponseType) => {
-      const originalUrl = item.url;
-      let newUrl = originalUrl;
-
-      if (item.source === "subdl") {
-        const [source, id, filename] = originalUrl.split("/");
-        if (source === "subdl" && id && filename) {
-          const host =
-            process.env.NODE_ENV === "production" ?
-              "https://sub.wyzie.ru"
-            : "http://localhost:3000";
-          const pseudoVrf = id;
-          const cleanFilename = filename.endsWith(".zip") ? filename.slice(0, -4) : filename;
-          let downloadId = cleanFilename.includes("-") ? cleanFilename : `${id}-${cleanFilename}`;
-          newUrl = `${host}/c/${pseudoVrf}/id/${downloadId}.subdl`;
-        }
-      } else {
-        const vrfMatch = originalUrl.match(/vrf-([a-z0-9]+)/);
-        const fileIdMatch = originalUrl.match(/file\/(\d+)/);
-        if (vrfMatch && vrfMatch[1] && fileIdMatch && fileIdMatch[1]) {
-          const vrf = vrfMatch[1];
-          const fileId = fileIdMatch[1];
-          const host =
-            process.env.NODE_ENV === "production" ?
-              "https://sub.wyzie.ru"
-            : "http://localhost:3000";
-          const formatParam = item.format ? `format=${encodeURIComponent(item.format)}` : "";
-          const encodingParam =
-            item.encoding ? `encoding=${encodeURIComponent(item.encoding)}` : "";
-          const queryParams = [formatParam, encodingParam].filter(Boolean).join("&");
-          newUrl = `${host}/c/${vrf}/id/${fileId}${queryParams ? "?" + queryParams : ""}`;
-        }
-      }
+      const newUrl = rewriteDownloadUrl(item, downloadHost);
 
       return {
         ...item,

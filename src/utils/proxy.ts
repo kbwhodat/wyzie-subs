@@ -1,6 +1,5 @@
 /** @format */
 
-import { subtle } from "crypto";
 import { USER_AGENTS } from "~/utils/userAgents";
 
 const getHeaders = (userAgent: string, extraHeaders: Record<string, string> = {}) => {
@@ -42,51 +41,24 @@ const getHeaders = (userAgent: string, extraHeaders: Record<string, string> = {}
   return { ...defaultHeaders, ...extraHeaders };
 };
 
-async function deriveToken(sharedSecret: string, key: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const keyMaterial = await subtle.importKey(
-    "raw",
-    encoder.encode(key),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-
-  const signature = await subtle.sign("HMAC", keyMaterial, encoder.encode(sharedSecret));
-
-  return Array.from(new Uint8Array(signature))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
 export async function proxyFetch(url: string, options?: RequestInit): Promise<Response> {
   try {
-    const proxy =
-      process.env.NODE_ENV === "production" ? "https://proxy.ar0.eu" : "http://83.229.17.104";
-    const proxyUrl = new URL(proxy);
+    // Direct fetch without proxy for local development
     const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
     const defaultHeaders = getHeaders(userAgent);
-    const sharedSecret = process.env.PROXY_SECRET;
-    if (!sharedSecret || sharedSecret.trim() === "") {
-      throw new Error("PROXY_SECRET is not set");
-    }
-    const apiToken = await deriveToken(sharedSecret, userAgent);
-    proxyUrl.searchParams.set("url", url);
 
-    const proxyOptions = {
+    const fetchOptions = {
       ...options,
       headers: {
         ...defaultHeaders,
         ...options?.headers,
-        "API-Token": apiToken,
-        Referer: options?.headers?.["Referer"] || "",
-        Origin: options?.headers?.["Origin"] || null,
       },
     };
 
-    return fetch(proxyUrl.toString(), proxyOptions);
+    console.log(`[Direct Fetch] Fetching URL: ${url}`);
+    return fetch(url, fetchOptions);
   } catch (e) {
-    console.error("Proxy fetch error:", e);
-    throw new Error(`Proxy request failed: ${e.message}`);
+    console.error("Fetch error:", e);
+    throw new Error(`Fetch request failed: ${e.message}`);
   }
 }

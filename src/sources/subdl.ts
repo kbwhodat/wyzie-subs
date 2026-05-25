@@ -6,6 +6,79 @@ import { numberToCardinal } from "~/utils/utils";
 import { proxyFetch } from "~/utils/proxy";
 import ISO6391 from "iso-639-1";
 
+const TMDB_API_KEY = "9867f3f6a5e78a2639afb0e2ffc0a311";
+
+type SubdlSearchResult = {
+  type: "movie" | "tv";
+  sd_id: string;
+  name: string;
+  original_name?: string;
+  poster_url: string;
+  year: number;
+  slug: string;
+  subtitles_count: number;
+};
+
+async function fetchViaSubdlProxy(url: string, headers: Record<string, string> = {}) {
+  return typeof proxyFetch === "function" ? proxyFetch(url, { headers }) : fetch(url, { headers });
+}
+
+async function getSubdlBuildId(): Promise<string> {
+  const response = await fetchViaSubdlProxy("https://subdl.com/", {
+    referer: "https://subdl.com/",
+  });
+
+  if (!response.ok) {
+    throw new Error(`SubDL homepage request failed with status ${response.status}`);
+  }
+
+  const html = await response.text();
+  const nextData = html.match(
+    /<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+  );
+
+  if (!nextData || !nextData[1]) {
+    throw new Error("SubDL homepage did not include __NEXT_DATA__ build metadata");
+  }
+
+  const parsed = JSON.parse(nextData[1]) as { buildId?: string };
+  if (!parsed.buildId) {
+    throw new Error("SubDL __NEXT_DATA__ did not include a buildId");
+  }
+
+  return parsed.buildId;
+}
+
+async function getTitleForImdbId(imdbId: string, isTvShow: boolean): Promise<string | null> {
+  const url = `https://api.themoviedb.org/3/find/${imdbId}?api_key=${TMDB_API_KEY}&external_source=imdb_id`;
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    console.warn(`[SubDL Source] TMDB lookup failed with status ${response.status}`);
+    return null;
+  }
+
+  const data = await response.json();
+  const result = isTvShow ? data.tv_results?.[0] : data.movie_results?.[0];
+
+  return result?.title || result?.name || result?.original_title || result?.original_name || null;
+}
+
+async function searchSubdlTitle(query: string): Promise<SubdlSearchResult[]> {
+  const searchUrl = `https://apiold.subdl.com/search?query=${encodeURIComponent(query)}`;
+  const response = await fetchViaSubdlProxy(searchUrl, {
+    referer: `https://subdl.com/search/${encodeURIComponent(query)}`,
+  });
+
+  if (!response.ok) {
+    throw new Error(`SubDL search API request failed with status ${response.status}`);
+  }
+
+  const searchData = (await response.json()) as { results?: SubdlSearchResult[] };
+
+  return searchData.results || [];
+}
+
 export async function searchSubdl(request: RequestType): Promise<ResponseType[]> {
   console.log(`[SubDL Source] Searching with parameters:`, {
     imdbId: request.imdbId,
@@ -18,67 +91,32 @@ export async function searchSubdl(request: RequestType): Promise<ResponseType[]>
   });
 
   try {
-    // WARNING: This uses a hardcoded Next.js build ID. which
-    // is specific to a particular deployment of subdl. This
-    // CAN break when SubDL updates their website so yea if it
-    // dies then its probably because subdl changed the build id
+    const buildId = await getSubdlBuildId();
+    const isTvShowRequest = request.season !== undefined && request.episode !== undefined;
+    const title = await getTitleForImdbId(request.imdbId, isTvShowRequest);
+    const searchResults = await searchSubdlTitle(title || request.imdbId);
+    const filteredSearchResults = searchResults.filter((result) =>
+      isTvShowRequest ? result.type === "tv" : result.type === "movie",
+    );
+    const searchResultItem = filteredSearchResults[0] || searchResults[0];
 
-    const buildId = "ULEay2yh9blH4JjD-J3ba";
-    const searchApiUrl = `https://subdl.com/_next/data/${buildId}/en/search/${request.imdbId}.json?slug=${request.imdbId}`;
-    const headers = {
-      referer: `https://subdl.com/search/${request.imdbId}`,
-      "x-nextjs-data": "1",
-    };
-    const response = await (typeof proxyFetch === "function" ?
-      proxyFetch(searchApiUrl, { headers })
-    : fetch(searchApiUrl, { headers }));
-
-    if (!response.ok) {
-      throw new Error(
-        `SubDL Next.js data API request failed with status ${response.status} for URL: ${searchApiUrl}`,
-      );
-    }
-
-    const responseText = await response.text();
-
-    interface SubdlNextSearchResponse {
-      pageProps: {
-        list: {
-          type: "movie" | "tv";
-          sd_id: string;
-          name: string;
-          original_name: string;
-          poster_url: string;
-          year: number;
-          slug: string;
-          subtitles_count: number;
-        }[];
-      };
-      __N_SSP: boolean;
-    }
-
-    const searchData: SubdlNextSearchResponse = JSON.parse(responseText);
-
-    if (
-      !searchData.pageProps ||
-      !searchData.pageProps.list ||
-      searchData.pageProps.list.length === 0
-    ) {
-      console.log(
-        `[SubDL Source] No results found via Next.js data API for IMDb ID: ${request.imdbId}`,
-      );
+    if (!searchResultItem) {
+      console.log(`[SubDL Source] No results found for IMDb ID: ${request.imdbId}`);
       return [];
     }
 
-    const searchResultItem = searchData.pageProps.list[0];
+    const headers = {
+      referer: `https://subdl.com/subtitle/${searchResultItem.sd_id}/${searchResultItem.slug}`,
+      "x-nextjs-data": "1",
+    };
     let finalSubtitleApiUrl = "";
     let finalReferer = "";
     let seasonSlug: string | null = null;
 
     if (searchResultItem.type === "movie") {
       console.log(`[SubDL Source] Movie detected.`);
-      finalSubtitleApiUrl = `https://subdl.com/_next/data/${buildId}/en/subtitle/${searchResultItem.sd_id}/${searchResultItem.slug}.json?slug=${searchResultItem.sd_id}&slug=${searchResultItem.slug}`;
-      finalReferer = `https://subdl.com/movie/${searchResultItem.slug}`;
+      finalSubtitleApiUrl = `https://subdl.com/_next/data/${buildId}/subtitle/${searchResultItem.sd_id}/${searchResultItem.slug}.json?slug=${searchResultItem.sd_id}&slug=${searchResultItem.slug}`;
+      finalReferer = `https://subdl.com/subtitle/${searchResultItem.sd_id}/${searchResultItem.slug}`;
     } else if (searchResultItem.type === "tv") {
       // --- TV Show Path ---
       if (request.season === undefined) {
@@ -92,14 +130,12 @@ export async function searchSubdl(request: RequestType): Promise<ResponseType[]>
         `[SubDL Source] TV Show detected (Season ${request.season}), fetching metadata to find season slug...`,
       );
 
-      const metadataApiUrl = `https://subdl.com/_next/data/${buildId}/en/subtitle/${searchResultItem.sd_id}/${searchResultItem.slug}.json?slug=${searchResultItem.sd_id}&slug=${searchResultItem.slug}`;
-      const metadataReferer = `https://subdl.com/tv/${searchResultItem.slug}`;
+      const metadataApiUrl = `https://subdl.com/_next/data/${buildId}/subtitle/${searchResultItem.sd_id}/${searchResultItem.slug}.json?slug=${searchResultItem.sd_id}&slug=${searchResultItem.slug}`;
+      const metadataReferer = `https://subdl.com/subtitle/${searchResultItem.sd_id}/${searchResultItem.slug}`;
       const metadataHeaders = { ...headers, referer: metadataReferer };
 
       console.log(`[SubDL Source] Calling internal Next.js metadata API: ${metadataApiUrl}`);
-      const metadataResponse = await (typeof proxyFetch === "function" ?
-        proxyFetch(metadataApiUrl, { headers: metadataHeaders })
-      : fetch(metadataApiUrl, { headers: metadataHeaders }));
+      const metadataResponse = await fetchViaSubdlProxy(metadataApiUrl, metadataHeaders);
 
       if (!metadataResponse.ok) {
         throw new Error(
@@ -140,8 +176,8 @@ export async function searchSubdl(request: RequestType): Promise<ResponseType[]>
       if (seasonInfo && seasonInfo.number) {
         seasonSlug = seasonInfo.number;
         console.log(`[SubDL Source] Found season slug: ${seasonSlug}`);
-        finalSubtitleApiUrl = `https://subdl.com/_next/data/${buildId}/en/subtitle/${searchResultItem.sd_id}/${searchResultItem.slug}/${seasonSlug}.json?slug=${searchResultItem.sd_id}&slug=${searchResultItem.slug}&slug=${seasonSlug}`;
-        finalReferer = `https://subdl.com/tv/${searchResultItem.slug}/${seasonSlug}`;
+        finalSubtitleApiUrl = `https://subdl.com/_next/data/${buildId}/subtitle/${searchResultItem.sd_id}/${searchResultItem.slug}/${seasonSlug}.json?slug=${searchResultItem.sd_id}&slug=${searchResultItem.slug}&slug=${seasonSlug}`;
+        finalReferer = `https://subdl.com/subtitle/${searchResultItem.sd_id}/${searchResultItem.slug}/${seasonSlug}`;
       } else {
         throw new Error(
           `[SubDL Source] Could not find matching season slug for season ${request.season} in metadata response.`, // Make this an error
@@ -160,9 +196,10 @@ export async function searchSubdl(request: RequestType): Promise<ResponseType[]>
     );
     const finalSubtitleHeaders = { ...headers, referer: finalReferer };
 
-    const finalSubtitleResponse = await (typeof proxyFetch === "function" ?
-      proxyFetch(finalSubtitleApiUrl, { headers: finalSubtitleHeaders })
-    : fetch(finalSubtitleApiUrl, { headers: finalSubtitleHeaders }));
+    const finalSubtitleResponse = await fetchViaSubdlProxy(
+      finalSubtitleApiUrl,
+      finalSubtitleHeaders,
+    );
 
     if (!finalSubtitleResponse.ok) {
       throw new Error(
@@ -244,7 +281,7 @@ export async function searchSubdl(request: RequestType): Promise<ResponseType[]>
       }
 
       for (const subtitle of subtitles) {
-        const format = subtitle.quality.toLowerCase();
+        const format = "srt";
         if (request.formats && request.formats.length > 0 && !request.formats.includes(format)) {
           continue;
         }
@@ -295,7 +332,7 @@ export async function searchSubdl(request: RequestType): Promise<ResponseType[]>
           id: subtitle.n_id || String(subtitle.id),
           url: compatibleUrl,
           flagUrl: `https://flagsapi.com/${countryCode}/flat/24.png`,
-          format: subtitle.quality.toLowerCase(),
+          format,
           encoding: "UTF-8",
           media: mediaDisplay,
           display: capitalizeFirstLetter(language),

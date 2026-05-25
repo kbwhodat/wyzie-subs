@@ -3,9 +3,112 @@
  * @format
  */
 
-import unzipjs from "~/lib/unzipjs.min.js";
 import { proxyFetch } from "~/utils/proxy";
 import type { UnzipItem, SubtitleExtractResult } from "~/utils/types";
+
+function readUint16(bytes: Uint8Array, offset: number): number {
+  return bytes[offset] | (bytes[offset + 1] << 8);
+}
+
+function readUint32(bytes: Uint8Array, offset: number): number {
+  return (
+    bytes[offset] |
+    (bytes[offset + 1] << 8) |
+    (bytes[offset + 2] << 16) |
+    (bytes[offset + 3] << 24)
+  ) >>> 0;
+}
+
+function exactArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+}
+
+function findEndOfCentralDirectory(bytes: Uint8Array): number {
+  const signature = 0x06054b50;
+  const minOffset = Math.max(0, bytes.length - 0xffff - 22);
+
+  for (let offset = bytes.length - 22; offset >= minOffset; offset--) {
+    if (readUint32(bytes, offset) === signature) {
+      return offset;
+    }
+  }
+
+  throw new Error("Invalid ZIP file: end of central directory not found");
+}
+
+async function inflateRaw(compressedBytes: Uint8Array): Promise<ArrayBuffer> {
+  const stream = new Response(compressedBytes).body;
+  if (!stream) {
+    throw new Error("Unable to create ZIP decompression stream");
+  }
+
+  return new Response(stream.pipeThrough(new DecompressionStream("deflate-raw"))).arrayBuffer();
+}
+
+function createUnzipItem(name: string, buffer: ArrayBuffer): UnzipItem {
+  return {
+    name,
+    buffer,
+    toString() {
+      try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(this.buffer);
+      } catch {
+        return "";
+      }
+    },
+  };
+}
+
+async function parseZipEntries(arrayBuffer: ArrayBuffer): Promise<UnzipItem[]> {
+  const bytes = new Uint8Array(arrayBuffer);
+  const eocdOffset = findEndOfCentralDirectory(bytes);
+  const entryCount = readUint16(bytes, eocdOffset + 10);
+  let centralDirectoryOffset = readUint32(bytes, eocdOffset + 16);
+  const entries: UnzipItem[] = [];
+
+  for (let entryIndex = 0; entryIndex < entryCount; entryIndex++) {
+    if (readUint32(bytes, centralDirectoryOffset) !== 0x02014b50) {
+      throw new Error("Invalid ZIP file: central directory entry not found");
+    }
+
+    const flags = readUint16(bytes, centralDirectoryOffset + 8);
+    const compressionMethod = readUint16(bytes, centralDirectoryOffset + 10);
+    const compressedSize = readUint32(bytes, centralDirectoryOffset + 20);
+    const fileNameLength = readUint16(bytes, centralDirectoryOffset + 28);
+    const extraFieldLength = readUint16(bytes, centralDirectoryOffset + 30);
+    const fileCommentLength = readUint16(bytes, centralDirectoryOffset + 32);
+    const localHeaderOffset = readUint32(bytes, centralDirectoryOffset + 42);
+    const fileNameBytes = bytes.slice(
+      centralDirectoryOffset + 46,
+      centralDirectoryOffset + 46 + fileNameLength,
+    );
+    const decoder = new TextDecoder(flags & 0x800 ? "utf-8" : "utf-8");
+    const fileName = decoder.decode(fileNameBytes);
+
+    if (readUint32(bytes, localHeaderOffset) !== 0x04034b50) {
+      throw new Error(`Invalid ZIP file: local header not found for ${fileName}`);
+    }
+
+    const localFileNameLength = readUint16(bytes, localHeaderOffset + 26);
+    const localExtraFieldLength = readUint16(bytes, localHeaderOffset + 28);
+    const dataOffset = localHeaderOffset + 30 + localFileNameLength + localExtraFieldLength;
+    const compressedBytes = bytes.slice(dataOffset, dataOffset + compressedSize);
+
+    let buffer: ArrayBuffer;
+    if (compressionMethod === 0) {
+      buffer = exactArrayBuffer(compressedBytes);
+    } else if (compressionMethod === 8) {
+      buffer = await inflateRaw(compressedBytes);
+    } else {
+      throw new Error(`Unsupported ZIP compression method ${compressionMethod} for ${fileName}`);
+    }
+
+    entries.push(createUnzipItem(fileName, buffer));
+    centralDirectoryOffset += 46 + fileNameLength + extraFieldLength + fileCommentLength;
+  }
+
+  return entries;
+}
 
 /**
  * Sherlock holme the sub files
@@ -300,7 +403,7 @@ export async function unzipAndExtractSubtitle(url: string): Promise<SubtitleExtr
     console.log("[SubDL Unzip] unzipping");
     const startTime = performance.now();
 
-    const unzipped: UnzipItem[] = unzipjs.parse(arrayBuffer);
+    const unzipped = await parseZipEntries(arrayBuffer);
 
     const endTime = performance.now();
     const duration = endTime - startTime;
