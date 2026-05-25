@@ -38,22 +38,56 @@ const getHeaders = (userAgent: string, extraHeaders: Record<string, string> = {}
     Connection: "keep-alive",
   };
 
-  return { ...defaultHeaders, ...extraHeaders };
+  return Object.fromEntries(
+    Object.entries({ ...defaultHeaders, ...extraHeaders }).filter(([, value]) => value !== null),
+  ) as Record<string, string>;
 };
+
+export async function createProxyToken(userAgent: string, secret: string) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(userAgent),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(secret));
+  return Array.from(new Uint8Array(signature))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 export async function proxyFetch(url: string, options?: RequestInit): Promise<Response> {
   try {
-    // Direct fetch without proxy for local development
     const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
     const defaultHeaders = getHeaders(userAgent);
-
-    const fetchOptions = {
-      ...options,
-      headers: {
-        ...defaultHeaders,
-        ...options?.headers,
-      },
+    const headers = {
+      ...defaultHeaders,
+      ...options?.headers,
     };
+    const fetchOptions: RequestInit = {
+      ...options,
+      headers,
+    };
+
+    const proxyUrl = process.env.PROXY_URL?.replace(/\/+$/, "");
+    const proxySecret = process.env.PROXY_SECRET;
+
+    if (proxyUrl && proxySecret) {
+      const proxyRequestUrl = new URL(proxyUrl);
+      proxyRequestUrl.searchParams.set("url", url);
+      proxyRequestUrl.searchParams.set("normal", "1");
+      proxyRequestUrl.searchParams.set("headers", JSON.stringify(headers));
+
+      console.log(`[Proxy Fetch] Fetching URL through proxy: ${url}`);
+      return fetch(proxyRequestUrl.toString(), {
+        ...fetchOptions,
+        headers: {
+          "User-Agent": userAgent,
+          "API-Token": await createProxyToken(userAgent, proxySecret),
+        },
+      });
+    }
 
     console.log(`[Direct Fetch] Fetching URL: ${url}`);
     return fetch(url, fetchOptions);
